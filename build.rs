@@ -4,18 +4,14 @@ use prost_build::Config;
 use std::{
     env,
     error::Error,
-    fs::{self, File},
-    io::Write,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
 use walkdir::{DirEntry, WalkDir};
 
-const SUBMODULE_ROOT: &str = "substrait";
-#[cfg(feature = "extensions")]
-const EXTENSIONS_ROOT: &str = "substrait/extensions";
-const PROTO_ROOT: &str = "substrait/proto";
-const TEXT_ROOT: &str = "substrait/text";
+const SUBMODULE_ROOT: &str = "incubator-gluten";
+const PROTO_ROOT: &str = "incubator-gluten/gluten-substrait/src/main/resources/substrait/proto";
 const GEN_ROOT: &str = "gen";
 
 /// Add Substrait version information to the build
@@ -119,143 +115,6 @@ pub const SUBSTRAIT_GIT_DIRTY: bool = {git_dirty};
     }
 }
 
-/// `text` type generation
-fn text(out_dir: &Path) -> Result<(), Box<dyn Error>> {
-    use heck::ToSnakeCase;
-    use schemars::schema::{RootSchema, Schema};
-    use typify::{TypeSpace, TypeSpaceSettings};
-
-    let mut out_file = File::create(out_dir.join("substrait_text").with_extension("rs"))?;
-
-    for schema_path in WalkDir::new(TEXT_ROOT)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file() || entry.file_type().is_symlink())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .filter(|&extension| extension == "yaml") // Option::contains
-                .is_some()
-        })
-        .map(DirEntry::into_path)
-        .inspect(|entry| {
-            println!("cargo:rerun-if-changed={}", entry.display());
-        })
-    {
-        let schema = serde_yaml::from_reader::<_, RootSchema>(File::open(&schema_path)?)?;
-        let metadata = schema.schema.metadata.as_ref();
-        let id = metadata
-            .and_then(|metadata| metadata.id.as_ref())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| {
-                panic!(
-                    "$id missing in schema metadata (`{}`)",
-                    schema_path.display()
-                )
-            });
-        let title = metadata
-            .and_then(|metadata| metadata.title.as_ref())
-            .map(|title| title.to_snake_case())
-            .unwrap_or_else(|| {
-                panic!(
-                    "title missing in schema metadata (`{}`)",
-                    schema_path.display()
-                )
-            });
-        let mut type_space = TypeSpace::new(TypeSpaceSettings::default().with_struct_builder(true));
-        type_space.add_ref_types(schema.definitions)?;
-        type_space.add_type(&Schema::Object(schema.schema))?;
-        out_file.write_fmt(format_args!(
-            r#"
-#[doc = "Generated types for `{id}`"]
-pub mod {title} {{
-    {}
-}}"#,
-            prettyplease::unparse(&syn::parse2::<syn::File>(type_space.to_stream())?),
-        ))?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "extensions")]
-/// Add Substrait core extensions
-fn extensions(version: semver::Version, out_dir: &Path) -> Result<(), Box<dyn Error>> {
-    use std::collections::HashMap;
-
-    let substrait_extensions_file = out_dir.join("extensions.in");
-
-    let mut output = String::from(
-        r#"// SPDX-License-Identifier: Apache-2.0
-// Note that this file is auto-generated and auto-synced using `build.rs`. It is
-// included in `extensions.rs`.
-"#,
-    );
-    let mut map = HashMap::<String, String>::default();
-    for extension in WalkDir::new(EXTENSIONS_ROOT)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .filter(|&extension| extension == "yaml")
-                .is_some()
-        })
-        .map(DirEntry::into_path)
-        .inspect(|entry| {
-            println!("cargo:rerun-if-changed={}", entry.display());
-        })
-    {
-        let name = extension.file_stem().unwrap_or_default().to_string_lossy();
-        let url = format!(
-            "https://github.com/substrait-io/substrait/raw/v{}/extensions/{}",
-            version,
-            extension.file_name().unwrap_or_default().to_string_lossy()
-        );
-        let var_name = name.to_uppercase();
-        output.push_str(&format!(
-            r#"
-/// Included source of [`{name}`]({url}).
-const {var_name}: &str = include_str!("{}/{}");
-"#,
-            PathBuf::from(dbg!(env::var("CARGO_MANIFEST_DIR").unwrap())).display(),
-            extension.display()
-        ));
-        map.insert(url, var_name);
-    }
-    // Add static lookup map.
-    output.push_str(
-        r#"
-use std::collections::HashMap;
-use std::str::FromStr;
-use once_cell::sync::Lazy;
-use crate::text::simple_extensions::SimpleExtensions;
-use url::Url;
-
-/// Map with Substrait core extensions. Maps URIs to included extensions.
-pub static EXTENSIONS: Lazy<HashMap<Url, SimpleExtensions>> = Lazy::new(|| {
-    let mut map = HashMap::new();"#,
-    );
-
-    for (url, var_name) in map {
-        output.push_str(&format!(r#"
-    map.insert(Url::from_str("{url}").expect("a valid url"), serde_yaml::from_str({var_name}).expect("a valid core extension"));"#));
-    }
-
-    output.push_str(
-        r#"
-    map
-});"#,
-    );
-
-    // Write the file.
-    fs::write(substrait_extensions_file, output)?;
-
-    Ok(())
-}
-
 #[cfg(feature = "serde")]
 /// Serialize and deserialize implementations for proto types using `pbjson`
 fn serde(protos: &[impl AsRef<Path>], out_dir: PathBuf) -> Result<(), Box<dyn Error>> {
@@ -285,11 +144,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     std::env::set_var("PROTOC", protobuf_src::protoc());
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-
-    text(out_dir.as_path())?;
-
-    #[cfg(feature = "extensions")]
-    extensions(_version, out_dir.as_path())?;
 
     let protos = WalkDir::new(PROTO_ROOT)
         .into_iter()

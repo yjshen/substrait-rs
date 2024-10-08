@@ -18,7 +18,6 @@ mod context;
 pub use context::Context;
 
 pub mod proto;
-pub mod text;
 
 mod typed;
 pub use typed::Anchor;

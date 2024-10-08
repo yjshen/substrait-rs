@@ -52,7 +52,7 @@ impl<C: Context> Parse<C> for proto::extensions::SimpleExtensionUri {
     type Parsed = SimpleExtensionUri;
     type Error = SimpleExtensionUriError;
 
-    fn parse(self, ctx: &mut C) -> Result<Self::Parsed, Self::Error> {
+    fn parse(self, _ctx: &mut C) -> Result<Self::Parsed, Self::Error> {
         let proto::extensions::SimpleExtensionUri {
             extension_uri_anchor: anchor,
             uri,
@@ -66,10 +66,6 @@ impl<C: Context> Parse<C> for proto::extensions::SimpleExtensionUri {
             uri,
             anchor: Anchor::new(anchor),
         };
-
-        // Make sure the URI is supported by this parse context, resolves and
-        // parses, and the anchor is unique.
-        ctx.add_simple_extension_uri(&simple_extension_uri)?;
 
         Ok(simple_extension_uri)
     }
